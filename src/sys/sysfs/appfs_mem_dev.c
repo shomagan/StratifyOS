@@ -17,6 +17,7 @@
  *
  */
 
+#include "mcu/arch.h"
 #include "cortexm/cortexm.h"
 #include "mcu/appfs.h"
 #include "mcu/flash.h"
@@ -28,14 +29,13 @@
 #define DECLARE_APPFS_CONFIG() const appfs_mem_config_t * config = handle->config
 #define DECLARE_APPFS_CONFIG_STATE() const appfs_mem_config_t * config = handle->config; appfs_mem_state_t * state = handle->state
 
+#define INVALID_PAGE ((u32)-1)
 static const appfs_mem_section_t * get_page_section_info(const appfs_mem_config_t * config, u32 page, u32 type, u32 * offset);
 
 static u32 get_memory_page_count(const appfs_mem_config_t * config, u32 type);
 static u32 get_memory_size(const appfs_mem_config_t * config, u32 type);
 
-static u32 get_page_size(const appfs_mem_config_t * config, u32 page, u32 type);
-static u32 get_page_addr(const appfs_mem_config_t * config, u32 page, u32 type);
-
+static int get_page_info(const appfs_mem_config_t * config, u32 page, u32 type, mem_pageinfo_t * info);
 static u32 get_page(const appfs_mem_config_t * config, u32 address, u32 size, u32 * type);
 
 int appfs_mem_open(const devfs_handle_t * handle){
@@ -105,6 +105,10 @@ int appfs_mem_getinfo(const devfs_handle_t * handle, void * ctl){
 	info->flash_size = get_memory_size(config, MEM_FLAG_IS_FLASH);
 	info->ram_pages = get_memory_page_count(config, MEM_FLAG_IS_RAM);
 	info->ram_size = get_memory_size(config, MEM_FLAG_IS_RAM);
+	info->external_ram_pages = get_memory_page_count(config, MEM_FLAG_IS_RAM | MEM_FLAG_IS_EXTERNAL);
+	info->external_ram_size = get_memory_size(config, MEM_FLAG_IS_RAM | MEM_FLAG_IS_EXTERNAL);
+	info->tightlycoupled_ram_pages = get_memory_page_count(config, MEM_FLAG_IS_RAM | MEM_FLAG_IS_TIGHTLY_COUPLED);
+	info->tightlycoupled_ram_size = get_memory_size(config, MEM_FLAG_IS_RAM | MEM_FLAG_IS_TIGHTLY_COUPLED);
 	info->system_ram_page = config->system_ram_page;
 	info->usage = config->usage;
 	info->usage_size = config->usage_size;
@@ -135,24 +139,31 @@ int appfs_mem_erasepage(const devfs_handle_t * handle, void * ctl){
 
 int appfs_mem_getpageinfo(const devfs_handle_t * handle, void * ctl){
 	DECLARE_APPFS_CONFIG();
-	u32 size = 0;
 	mem_pageinfo_t * pageinfo = ctl;
 
 	if( pageinfo->o_flags & MEM_FLAG_IS_QUERY ){
 		u32 type;
 		pageinfo->num = get_page(config, pageinfo->addr, 0, &type);
-		pageinfo->size = get_page_size(config, pageinfo->num, MEM_FLAG_IS_RAM);
 		pageinfo->o_flags = type;
+		//pageinfo->size = get_page_size(config, pageinfo->num, type & (MEM_FLAG_IS_RAM|MEM_FLAG_IS_FLASH));
 		if( type == 0 ){ return SYSFS_SET_RETURN(EINVAL); }
-		return 0;
+		//return 0;
 	}
 
+	if( get_page_info(config, pageinfo->num, pageinfo->o_flags, pageinfo) < 0 ){
+		return SYSFS_SET_RETURN(EINVAL);
+	}
+
+	return 0;
+
+#if 0
 	size = get_page_size(config, pageinfo->num, pageinfo->o_flags);
+	mcu_debug_printf("get info for page %d 0x%lX %ld\n", pageinfo->num, pageinfo->o_flags, size);
 	if (size == 0 ){ return SYSFS_SET_RETURN(EINVAL); }
 	pageinfo->addr = get_page_addr(config, pageinfo->num, pageinfo->o_flags);
 	pageinfo->size = size;
-
 	return 0;
+#endif
 }
 
 int appfs_mem_writepage(const devfs_handle_t * handle, void * ctl){
@@ -160,9 +171,14 @@ int appfs_mem_writepage(const devfs_handle_t * handle, void * ctl){
 	mem_writepage_t * write_page_info = ctl;
 	u32 type;
 	int result;
-	get_page(config, (u32)write_page_info->addr, (u32)write_page_info->nbyte, &type);
 
-	if( type == 0 ){ return SYSFS_SET_RETURN(EINVAL); }
+	result = get_page(config, (u32)write_page_info->addr, (u32)write_page_info->nbyte, &type);
+
+	if( type == 0 ){
+		mcu_debug_printf("type for %p is 0x%X on page %d\n",
+							  write_page_info->addr, type, result);
+		return SYSFS_SET_RETURN(EINVAL);
+	}
 
 	if( type & MEM_FLAG_IS_RAM ){
 		//check to see if the memcpy fits in RAM
@@ -187,7 +203,7 @@ const appfs_mem_section_t * get_page_section_info(
 		u32 * offset){
 	u32 find_page = 0;
 	for(u32 i=0; i < config->section_count; i++){
-		if( config->sections[i].o_flags & type ){
+		if( config->sections[i].o_flags & type ){ //does page match any flag in type -- ram types will have same numbering
 			if( page < find_page + config->sections[i].page_count ){
 				//page lands on this page
 				*offset = page - find_page;
@@ -200,22 +216,33 @@ const appfs_mem_section_t * get_page_section_info(
 }
 
 u32 get_page(const appfs_mem_config_t * config, u32 address, u32 size, u32 * type){
-	u32 page = 0;
+	u32 ram_page = 0;
+	u32 flash_page = 0;
 	*type = 0; //zero means it didn't find anything
 	for(u32 i=0; i < config->section_count; i++){
 		//is the address in this section?
 		if( (address >= config->sections[i].address) &&
-			 ((address + size) < config->sections[i].address + config->sections[i].page_size * config->sections[i].page_count)
+			 ((address + size) <= config->sections[i].address + config->sections[i].page_size * config->sections[i].page_count)
 			 ){
 			//what is the page offset?
-			u32 offset = (address - config->sections[i].address)/ config->sections[i].page_size;
+			u32 offset = (address - config->sections[i].address) / config->sections[i].page_size;
 			*type = config->sections[i].o_flags;
+			u32 page;
+			if( config->sections[i].o_flags & MEM_FLAG_IS_FLASH ){
+				page = flash_page;
+			} else {
+				page = ram_page;
+			}
 			return page + offset;
 		}
-		page += config->sections[i].page_count;
-	}
 
-	return 0;
+		if( config->sections[i].o_flags & MEM_FLAG_IS_FLASH ){
+			flash_page += config->sections[i].page_count;
+		} else {
+			ram_page += config->sections[i].page_count;
+		}
+	}
+	return INVALID_PAGE;
 }
 
 u32 get_memory_page_count(const appfs_mem_config_t * config, u32 type){
@@ -238,18 +265,15 @@ u32 get_memory_size(const appfs_mem_config_t * config, u32 type){
 	return size;
 }
 
-u32 get_page_size(const appfs_mem_config_t * config, u32 page, u32 type){
+int get_page_info(const appfs_mem_config_t * config, u32 page, u32 type, mem_pageinfo_t * info){
 	u32 offset;
 	const appfs_mem_section_t * section = get_page_section_info(config, page, type, &offset);
-	if( section == 0 ){ return 0; }
-	return section->page_size;
-}
-
-u32 get_page_addr(const appfs_mem_config_t * config, u32 page, u32 type){
-	u32 offset;
-	const appfs_mem_section_t * section = get_page_section_info(config, page, type, &offset);
-	if( section == 0 ){ return 0; }
-	return section->address + offset * section->page_size;
+	if( section == 0 ){ return -1; }
+	info->num = page;
+	info->addr = section->address + offset * section->page_size;
+	info->o_flags = section->o_flags;
+	info->size = section->page_size;
+	return 0;
 }
 
 

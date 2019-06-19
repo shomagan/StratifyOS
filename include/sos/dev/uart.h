@@ -104,6 +104,7 @@ typedef enum {
 	UART_FLAG_IS_PARITY_ODD /*! Indicates odd parity */ = (1<<6),
 	UART_FLAG_IS_PARITY_EVEN /*! Indicates even parity */ = (1<<7),
 	UART_FLAG_SET_LINE_CODING_DEFAULT /*! Sets line coding to no parity and one stop bit */ = (UART_FLAG_SET_LINE_CODING | UART_FLAG_IS_STOP1 | UART_FLAG_IS_PARITY_NONE),
+	UART_FLAG_IS_RX_FIFO /*! The UART supports an receive buffer FIFO (read only using I_UART_GETINFO)  */
 } uart_flag_t;
 
 
@@ -112,7 +113,9 @@ typedef enum {
 typedef struct MCU_PACK {
 	u32 o_flags /*! A bitmask for the supported features */;
 	u32 o_events /*! Events supported by this driver */;
-	u32 resd[8];
+	u32 size_ready /*! Number of bytes ready if a FIFO is built-in */;
+	u32 size /*! Number of bytes available to the FIFO */;
+	u32 resd[7];
 } uart_info_t;
 
 typedef struct MCU_PACK {

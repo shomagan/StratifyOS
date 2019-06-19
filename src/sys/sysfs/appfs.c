@@ -188,9 +188,9 @@ int appfs_startup(const void * cfg){
 			 (get_fileinfo_args.file_info.exec.o_flags & APPFS_FLAG_IS_STARTUP) ){
 
 			//start the process
-			mem.code.addr = (void*)get_fileinfo_args.file_info.exec.code_start;
+			mem.code.address = (void*)get_fileinfo_args.file_info.exec.code_start;
 			mem.code.size = get_fileinfo_args.file_info.exec.code_size;
-			mem.data.addr = (void*)get_fileinfo_args.file_info.exec.ram_start;
+			mem.data.address = (void*)get_fileinfo_args.file_info.exec.ram_start;
 			mem.data.size = get_fileinfo_args.file_info.exec.ram_size;
 
 			if ( scheduler_create_process((void*)get_fileinfo_args.file_info.exec.startup,
@@ -273,7 +273,7 @@ int appfs_open(const void * cfg, void ** handle, const char * path, int flags, i
 		}
 	}
 
-	if ( ret == -1 ){
+	if ( ret < 0 ){
 		free(h);
 		h = NULL;
 	}
@@ -346,8 +346,14 @@ int appfs_unlink(const void* cfg, const char * path){
 
 
 	} else {
+		u32 rasr, rbar;
 		ram.page = get_pageinfo_args.page_info.num;
-		ram.size = file_info.exec.code_size + file_info.exec.data_size;
+
+		//the actual amount is not stored anywhere so it needs to be calculated again using the MPU
+		ram.size = mpu_calc_region(0,
+											(void*)get_pageinfo_args.page_info.addr,
+											file_info.exec.code_size + file_info.exec.data_size,
+											0, 0, 0, &rbar, &rasr);
 		//The Ram size is the code size + the data size round up to the next power of 2 to account for memory protection
 		cortexm_svcall(appfs_ram_svcall_set, &ram);
 	}
@@ -363,6 +369,7 @@ int appfs_unlink(const void* cfg, const char * path){
 		get_pageinfo_args.page_info.addr = file_info.exec.ram_start;
 		get_pageinfo_args.page_info.o_flags = MEM_FLAG_IS_QUERY;
 
+		//use query to get the page number of the address
 		cortexm_svcall(appfs_util_svcall_get_pageinfo, &get_pageinfo_args);
 		if ( get_pageinfo_args.result < 0 ){
 			return SYSFS_SET_RETURN(EIO);
@@ -528,10 +535,19 @@ int appfs_write(const void * cfg, void * handle, int flags, int loc, const void 
 	return SYSFS_SET_RETURN(EROFS);
 }
 
+void root_appfs_close(void * args){
+	appfs_handle_t * h = args;
+	mcu_core_invalidate_instruction_cache();
+	mcu_core_invalidate_data_cache_block(
+				(void*)h->type.install.code_start, h->type.install.code_size);
+}
 
 int appfs_close(const void* cfg, void ** handle){
 	//close a file
 	appfs_handle_t * h = (appfs_handle_t*)*handle;
+	if( h->is_install ){
+		cortexm_svcall(root_appfs_close, h);
+	}
 	free(h);
 	h = NULL;
 	return 0;
@@ -584,7 +600,6 @@ void root_ioctl(void * args){
 				a->result = SYSFS_SET_RETURN(ENOTSUP);
 			} else {
 				a->result = appfs_util_root_create(a->cfg, h, attr);
-				mcu_core_invalidate_data_cache();
 			}
 			break;
 

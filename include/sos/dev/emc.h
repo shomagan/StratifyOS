@@ -46,6 +46,10 @@
 
 #define EMC_VERSION (0x030000)
 #define EMC_IOC_IDENT_CHAR 'E'
+#define MAX_DATA_BUS_SIZE 32
+#define MAX_ADDRESS_BUS_SIZE 26
+#define MAX_NCS_NUM 4
+#define MAX_BL_NUM  4
 
 /*! \brief See below for details */
 /*! \details These are the flags for mode in emc_attr_t */
@@ -72,12 +76,12 @@ typedef enum {
 typedef struct MCU_PACK {
     mcu_pin_t we;
     mcu_pin_t oe;
-    mcu_pin_t bl[4];
+    mcu_pin_t bl[MAX_BL_NUM];
     mcu_pin_t nadv;
     mcu_pin_t nwait;
-    mcu_pin_t ncs[4];
-    mcu_pin_t address[26];
-    mcu_pin_t data[32];
+    mcu_pin_t ncs[MAX_NCS_NUM];
+    mcu_pin_t address[MAX_ADDRESS_BUS_SIZE];
+    mcu_pin_t data[MAX_DATA_BUS_SIZE];
 } emc_pin_assignment_t;
 
 typedef struct {
